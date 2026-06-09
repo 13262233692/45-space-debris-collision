@@ -1,0 +1,9 @@
+sgp4>=2.22
+dask[complete]>=2024.1.0
+distributed>=2024.1.0
+pandas>=2.1.0
+xarray>=2024.1.0
+numpy>=1.26.0
+plotly>=5.18.0
+dash>=2.14.0
+scipy>=1.12.0
