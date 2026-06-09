@@ -1,6 +1,7 @@
 import re
 import datetime
 import numpy as np
+import pandas as pd
 from sgp4.api import Satrec, WGS72
 from sgp4.io import twoline2rv
 from sgp4.earth_gravity import wgs72
@@ -54,7 +55,6 @@ def extract_orbital_params(line2):
         arg_perigee = float(line2[34:42].strip())
         mean_anomaly = float(line2[43:51].strip())
         mean_motion = float(line2[52:63].strip())
-        semi_major_axis = (6378.137 / 1000.0) ** 1
         mu = 398600.4418
         a = (mu / (mean_motion * 2 * np.pi / 86400.0) ** 2) ** (1.0 / 3.0)
         altitude_km = a - EARTH_RADIUS_KM
@@ -172,6 +172,107 @@ def propagate_chunk(tle_chunk, jd_start, jd_end, step_minutes=DEFAULT_TIME_STEP_
         )
 
     return chunk_results
+
+
+def propagate_partition_to_dataframe(tle_partition, jd_start, jd_end, step_minutes=DEFAULT_TIME_STEP_MINUTES):
+    rows = []
+
+    for tle_entry in tle_partition:
+        if len(tle_entry) == 3:
+            name, line1, line2 = tle_entry
+            sat_id = name.strip() if name.strip() else extract_satellite_id(line1, line2)
+        else:
+            line1, line2 = tle_entry
+            sat_id = extract_satellite_id(line1, line2)
+
+        satrec = build_satrec_from_tle(tle_entry)
+        if satrec is None:
+            continue
+
+        prop = propagate_single_j2000(satrec, jd_start, jd_end, step_minutes)
+        if prop is None:
+            continue
+
+        orb_params = extract_orbital_params(line2)
+        altitude_km = orb_params["altitude_km"] if orb_params else 0.0
+        eccentricity = orb_params["eccentricity"] if orb_params else 0.0
+        category = classify_orbit(altitude_km, eccentricity)
+
+        n_pts = len(prop["positions_km"])
+        for t in range(n_pts):
+            rows.append(
+                {
+                    "satellite_id": sat_id,
+                    "category": category,
+                    "altitude_km": altitude_km,
+                    "time_step": t,
+                    "time_jd": prop["times_jd"][t],
+                    "x_km": prop["positions_km"][t, 0],
+                    "y_km": prop["positions_km"][t, 1],
+                    "z_km": prop["positions_km"][t, 2],
+                    "vx_kms": prop["velocities_kms"][t, 0],
+                    "vy_kms": prop["velocities_kms"][t, 1],
+                    "vz_kms": prop["velocities_kms"][t, 2],
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "satellite_id", "category", "altitude_km", "time_step",
+                "time_jd", "x_km", "y_km", "z_km", "vx_kms", "vy_kms", "vz_kms",
+            ]
+        )
+
+    return pd.DataFrame(rows)
+
+
+def propagate_partition_to_summary(tle_partition, jd_start, jd_end, step_minutes=DEFAULT_TIME_STEP_MINUTES):
+    rows = []
+
+    for tle_entry in tle_partition:
+        if len(tle_entry) == 3:
+            name, line1, line2 = tle_entry
+            sat_id = name.strip() if name.strip() else extract_satellite_id(line1, line2)
+        else:
+            line1, line2 = tle_entry
+            sat_id = extract_satellite_id(line1, line2)
+
+        satrec = build_satrec_from_tle(tle_entry)
+        if satrec is None:
+            continue
+
+        prop = propagate_single_j2000(satrec, jd_start, jd_end, step_minutes)
+        if prop is None:
+            continue
+
+        orb_params = extract_orbital_params(line2)
+        altitude_km = orb_params["altitude_km"] if orb_params else 0.0
+        eccentricity = orb_params["eccentricity"] if orb_params else 0.0
+        category = classify_orbit(altitude_km, eccentricity)
+
+        rows.append(
+            {
+                "satellite_id": sat_id,
+                "category": category,
+                "altitude_km": altitude_km,
+                "eccentricity": eccentricity,
+                "n_trajectory_points": len(prop["positions_km"]),
+                "inclination": orb_params["inclination"] if orb_params else 0.0,
+                "raan": orb_params["raan"] if orb_params else 0.0,
+                "mean_motion": orb_params["mean_motion"] if orb_params else 0.0,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "satellite_id", "category", "altitude_km", "eccentricity",
+                "n_trajectory_points", "inclination", "raan", "mean_motion",
+            ]
+        )
+
+    return pd.DataFrame(rows)
 
 
 def compute_jd_from_datetime(dt=None):

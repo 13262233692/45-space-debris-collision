@@ -5,7 +5,15 @@ from dash import dcc, html, Input, Output, State, callback_context
 import plotly.graph_objects as go
 import pandas as pd
 
-from config import DASH_HOST, DASH_PORT, DASH_DEBUG, DEFAULT_PROPAGATION_HOURS, DEFAULT_TIME_STEP_MINUTES, DATA_DIR
+from config import (
+    DASH_HOST,
+    DASH_PORT,
+    DASH_DEBUG,
+    DEFAULT_PROPAGATION_HOURS,
+    DEFAULT_TIME_STEP_MINUTES,
+    DATA_DIR,
+    MAX_VIS_POINTS,
+)
 from dask_scheduler import DaskOrbitScheduler
 from tle_generator import generate_sample_tle_dataset
 from visualization import (
@@ -29,6 +37,7 @@ scheduler = DaskOrbitScheduler()
 _propagation_done = False
 _total_objects = 0
 _n_time_steps = 0
+_category_counts = {"LEO": 0, "MEO": 0, "GEO": 0, "HEO": 0}
 
 
 def _ensure_tle_data():
@@ -40,7 +49,7 @@ def _ensure_tle_data():
 
 
 def _run_initial_propagation():
-    global _propagation_done, _total_objects, _n_time_steps
+    global _propagation_done, _total_objects, _n_time_steps, _category_counts
     if _propagation_done:
         return
 
@@ -53,11 +62,9 @@ def _run_initial_propagation():
         step_minutes=DEFAULT_TIME_STEP_MINUTES,
     )
 
-    results = scheduler.results
-    if results:
-        _total_objects = len(results)
-        _n_time_steps = max(len(r["positions_km"]) for r in results)
-
+    _total_objects = scheduler.total_objects
+    _n_time_steps = scheduler.n_time_steps
+    _category_counts = scheduler.get_category_counts()
     _propagation_done = True
     logger.info(f"Propagation complete: {_total_objects} objects, {_n_time_steps} time steps")
 
@@ -88,10 +95,6 @@ STAT_BOX_STYLE = {
     "minWidth": "120px",
 }
 
-SLIDER_STYLE = {
-    "width": "100%",
-}
-
 app.layout = html.Div(
     style={"background": "#050510", "color": "#c0d0e0", "fontFamily": "Consolas, monospace", "minHeight": "100vh"},
     children=[
@@ -111,7 +114,7 @@ app.layout = html.Div(
                             },
                         ),
                         html.Span(
-                            "J2000 Inertial Frame \u2022 SGP4 Propagation \u2022 Dask Distributed Computing",
+                            "J2000 Inertial Frame \u2022 SGP4 Propagation \u2022 Dask Bag + Parquet",
                             style={"fontSize": "11px", "color": "#5577aa", "letterSpacing": "1px"},
                         ),
                     ]
@@ -296,7 +299,7 @@ def update_3d_scene(time_step, display_opts):
     if not display_opts:
         display_opts = []
 
-    snapshot_df = scheduler.get_snapshot_at_time(time_index=time_step)
+    snapshot_df = scheduler.get_snapshot_at_time_sampled(time_index=time_step, max_points=MAX_VIS_POINTS)
 
     category_map = {"leo": "LEO", "meo": "MEO", "geo": "GEO", "heo": "HEO"}
     visible_categories = []
@@ -326,11 +329,7 @@ def update_3d_scene(time_step, display_opts):
         ),
     )
 
-    stats = {"LEO": 0, "MEO": 0, "GEO": 0, "HEO": 0}
-    if snapshot_df is not None and not snapshot_df.empty:
-        for cat in stats:
-            stats[cat] = len(snapshot_df[snapshot_df["category"] == cat])
-
+    stats = dict(_category_counts)
     total = sum(stats.values())
     hours_el = time_step * DEFAULT_TIME_STEP_MINUTES / 60.0
     time_text = f"Elapsed: {hours_el:.1f}h / {DEFAULT_PROPAGATION_HOURS}h  |  Step: {time_step * DEFAULT_TIME_STEP_MINUTES} min"
@@ -338,21 +337,22 @@ def update_3d_scene(time_step, display_opts):
     engine_text = (
         f"SGP4/WGS72 Propagator\n"
         f"Frame: J2000 ECI\n"
-        f"Chunk Size: {scheduler.chunk_size}\n"
+        f"Engine: dask.bag + Parquet\n"
+        f"Partition Size: {scheduler.chunk_size}\n"
         f"Workers: {scheduler.n_workers}\n"
         f"Time Step: {DEFAULT_TIME_STEP_MINUTES} min\n"
         f"Window: {DEFAULT_PROPAGATION_HOURS}h"
     )
 
-    status_text = f"\u2713 {_total_objects} objects tracked | {_n_time_steps} time steps"
+    status_text = f"\u2713 {_total_objects} objects tracked | {_n_time_steps} time steps | Parquet backend"
 
     return (
         fig,
         str(total),
-        str(stats["LEO"]),
-        str(stats["MEO"]),
-        str(stats["GEO"]),
-        str(stats["HEO"]),
+        str(stats.get("LEO", 0)),
+        str(stats.get("MEO", 0)),
+        str(stats.get("GEO", 0)),
+        str(stats.get("HEO", 0)),
         time_text,
         engine_text,
         status_text,
@@ -412,9 +412,11 @@ def display_object_detail(click_data):
 
 
 def main():
+    global _propagation_done, _total_objects, _n_time_steps, _category_counts
+
     logger.info("=" * 60)
     logger.info("  SPACE DEBRIS MONITORING PLATFORM")
-    logger.info("  SGP4 + Dask + Plotly/Dash")
+    logger.info("  SGP4 + Dask Bag/Parquet + Plotly/Dash")
     logger.info("=" * 60)
 
     tle_path = _ensure_tle_data()
