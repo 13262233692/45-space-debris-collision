@@ -13,13 +13,15 @@ from config import (
     DEFAULT_TIME_STEP_MINUTES,
     DATA_DIR,
     MAX_VIS_POINTS,
+    CA_POC_RED_THRESHOLD,
+    CA_POC_YELLOW_THRESHOLD,
 )
 from dask_scheduler import DaskOrbitScheduler
 from tle_generator import generate_sample_tle_dataset
 from visualization import (
     build_3d_scene,
     create_debris_snapshot_scatter,
-    create_debris_scatter,
+    create_conjunction_warning_lines,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -38,6 +40,8 @@ _propagation_done = False
 _total_objects = 0
 _n_time_steps = 0
 _category_counts = {"LEO": 0, "MEO": 0, "GEO": 0, "HEO": 0}
+_conjunctions = []
+_pulse_phase = 0
 
 
 def _ensure_tle_data():
@@ -49,12 +53,12 @@ def _ensure_tle_data():
 
 
 def _run_initial_propagation():
-    global _propagation_done, _total_objects, _n_time_steps, _category_counts
+    global _propagation_done, _total_objects, _n_time_steps, _category_counts, _conjunctions
     if _propagation_done:
         return
 
     tle_path = _ensure_tle_data()
-    logger.info("Starting initial orbital propagation...")
+    logger.info("Starting initial orbital propagation + CA assessment...")
 
     scheduler.submit_propagation_local(
         tle_path,
@@ -65,8 +69,9 @@ def _run_initial_propagation():
     _total_objects = scheduler.total_objects
     _n_time_steps = scheduler.n_time_steps
     _category_counts = scheduler.get_category_counts()
+    _conjunctions = scheduler.get_conjunctions()
     _propagation_done = True
-    logger.info(f"Propagation complete: {_total_objects} objects, {_n_time_steps} time steps")
+    logger.info(f"Pipeline complete: {_total_objects} objects, {_n_time_steps} steps, {len(_conjunctions)} conjunctions")
 
 
 HEADER_STYLE = {
@@ -95,6 +100,36 @@ STAT_BOX_STYLE = {
     "minWidth": "120px",
 }
 
+ALERT_RED_STYLE = {
+    "background": "rgba(180,20,20,0.3)",
+    "border": "1px solid rgba(255,50,50,0.6)",
+    "borderRadius": "6px",
+    "padding": "8px 12px",
+    "marginBottom": "6px",
+    "fontSize": "11px",
+    "color": "#ff8888",
+}
+
+ALERT_YELLOW_STYLE = {
+    "background": "rgba(180,160,20,0.2)",
+    "border": "1px solid rgba(255,200,50,0.4)",
+    "borderRadius": "6px",
+    "padding": "8px 12px",
+    "marginBottom": "6px",
+    "fontSize": "11px",
+    "color": "#ffdd88",
+}
+
+ALERT_GREEN_STYLE = {
+    "background": "rgba(20,120,20,0.15)",
+    "border": "1px solid rgba(80,200,80,0.3)",
+    "borderRadius": "6px",
+    "padding": "8px 12px",
+    "marginBottom": "6px",
+    "fontSize": "11px",
+    "color": "#88cc88",
+}
+
 app.layout = html.Div(
     style={"background": "#050510", "color": "#c0d0e0", "fontFamily": "Consolas, monospace", "minHeight": "100vh"},
     children=[
@@ -114,7 +149,7 @@ app.layout = html.Div(
                             },
                         ),
                         html.Span(
-                            "J2000 Inertial Frame \u2022 SGP4 Propagation \u2022 Dask Bag + Parquet",
+                            "J2000 \u2022 SGP4 \u2022 Dask/Parquet \u2022 Conjunction Assessment",
                             style={"fontSize": "11px", "color": "#5577aa", "letterSpacing": "1px"},
                         ),
                     ]
@@ -146,12 +181,23 @@ app.layout = html.Div(
                 ),
                 html.Div(
                     style={
-                        "width": "320px",
+                        "width": "340px",
                         "overflowY": "auto",
                         "borderLeft": "1px solid rgba(80,120,200,0.2)",
                         "padding": "12px",
                     },
                     children=[
+                        html.Div(
+                            style=PANEL_STYLE,
+                            children=[
+                                html.H4(
+                                    "\u26A0 CONJUNCTION ALERTS",
+                                    style={"margin": "0 0 8px 0", "fontSize": "13px", "color": "#ff6644"},
+                                ),
+                                html.Div(id="ca-summary", style={"marginBottom": "8px", "fontSize": "11px", "color": "#99aabb"}),
+                                html.Div(id="ca-alerts-list", style={"maxHeight": "300px", "overflowY": "auto"}),
+                            ],
+                        ),
                         html.Div(
                             style=PANEL_STYLE,
                             children=[
@@ -239,8 +285,9 @@ app.layout = html.Div(
                                         {"label": " MEO Debris", "value": "meo"},
                                         {"label": " GEO Debris", "value": "geo"},
                                         {"label": " HEO Debris", "value": "heo"},
+                                        {"label": " \u26A0 CA Warning Lines", "value": "ca_warnings"},
                                     ],
-                                    value=["earth", "atmosphere", "ref_orbits", "leo", "meo", "geo", "heo"],
+                                    value=["earth", "atmosphere", "ref_orbits", "leo", "meo", "geo", "heo", "ca_warnings"],
                                     style={"fontSize": "12px", "color": "#aabbcc"},
                                     inputStyle={"marginRight": "6px"},
                                     labelStyle={"display": "block", "marginBottom": "4px"},
@@ -286,13 +333,19 @@ app.layout = html.Div(
         Output("time-display", "children"),
         Output("engine-info", "children"),
         Output("system-status", "children"),
+        Output("ca-summary", "children"),
+        Output("ca-alerts-list", "children"),
     ],
     [
         Input("time-slider", "value"),
         Input("display-options", "value"),
+        Input("play-interval", "n_intervals"),
     ],
 )
-def update_3d_scene(time_step, display_opts):
+def update_3d_scene(time_step, display_opts, pulse_n):
+    global _pulse_phase
+    _pulse_phase = (pulse_n % 10) / 10.0
+
     if not _propagation_done:
         _run_initial_propagation()
 
@@ -313,8 +366,15 @@ def update_3d_scene(time_step, display_opts):
     else:
         debris_traces = []
 
+    conjunction_traces = []
+    if "ca_warnings" in display_opts and _conjunctions:
+        nearby_conjs = scheduler.get_conjunctions_at_time(time_step, tolerance=5)
+        if nearby_conjs:
+            conjunction_traces = create_conjunction_warning_lines(nearby_conjs, pulse_phase=_pulse_phase)
+
     fig = build_3d_scene(
         debris_traces,
+        conjunction_traces=conjunction_traces if conjunction_traces else None,
         show_earth="earth" in display_opts,
         show_atmosphere="atmosphere" in display_opts,
         show_reference_orbits="ref_orbits" in display_opts,
@@ -334,17 +394,52 @@ def update_3d_scene(time_step, display_opts):
     hours_el = time_step * DEFAULT_TIME_STEP_MINUTES / 60.0
     time_text = f"Elapsed: {hours_el:.1f}h / {DEFAULT_PROPAGATION_HOURS}h  |  Step: {time_step * DEFAULT_TIME_STEP_MINUTES} min"
 
+    n_red = sum(1 for c in _conjunctions if c["alert_level"] == "RED")
+    n_yellow = sum(1 for c in _conjunctions if c["alert_level"] == "YELLOW")
+    n_green = sum(1 for c in _conjunctions if c["alert_level"] == "GREEN")
+
     engine_text = (
-        f"SGP4/WGS72 Propagator\n"
+        f"SGP4/WGS72 + CA Engine\n"
         f"Frame: J2000 ECI\n"
-        f"Engine: dask.bag + Parquet\n"
+        f"Engine: Dask + Parquet\n"
         f"Partition Size: {scheduler.chunk_size}\n"
         f"Workers: {scheduler.n_workers}\n"
         f"Time Step: {DEFAULT_TIME_STEP_MINUTES} min\n"
-        f"Window: {DEFAULT_PROPAGATION_HOURS}h"
+        f"PoC Red Line: {CA_POC_RED_THRESHOLD:.0e}\n"
+        f"Conjunctions: {len(_conjunctions)}"
     )
 
-    status_text = f"\u2713 {_total_objects} objects tracked | {_n_time_steps} time steps | Parquet backend"
+    status_text = f"\u2713 {_total_objects} objects | {len(_conjunctions)} CA | PoC>{CA_POC_RED_THRESHOLD:.0e}: {n_red} RED"
+
+    ca_summary = (
+        f"Screened: {_total_objects} objects | "
+        f"RED: {n_red} | YELLOW: {n_yellow} | GREEN: {n_green} | "
+        f"Red threshold: PoC \u2265 {CA_POC_RED_THRESHOLD:.0e}"
+    )
+
+    alert_items = []
+    sorted_conjs = sorted(_conjunctions, key=lambda c: c["poc"], reverse=True)
+    for c in sorted_conjs[:30]:
+        if c["alert_level"] == "RED":
+            style = ALERT_RED_STYLE
+            icon = "\u26A0\ufe0f RED"
+        elif c["alert_level"] == "YELLOW":
+            style = ALERT_YELLOW_STYLE
+            icon = "\u26A1 YEL"
+        else:
+            style = ALERT_GREEN_STYLE
+            icon = "\u2713 GRN"
+
+        alert_items.append(
+            html.Div(style=style, children=[
+                html.Div(f"{icon}  {c['primary_id'][:14]} \u2194 {c['secondary_id'][:14]}"),
+                html.Div(f"Miss: {c['miss_distance_km']:.3f} km  |  Rel.V: {c['relative_velocity_kms']:.2f} km/s"),
+                html.Div(f"PoC: {c['poc']:.2e}  |  TCA step: {int(c['tca_index'])}"),
+            ])
+        )
+
+    if not alert_items:
+        alert_items = [html.Div("No conjunctions detected.", style={"fontSize": "11px", "color": "#668866"})]
 
     return (
         fig,
@@ -356,6 +451,8 @@ def update_3d_scene(time_step, display_opts):
         time_text,
         engine_text,
         status_text,
+        ca_summary,
+        alert_items,
     )
 
 
@@ -412,11 +509,11 @@ def display_object_detail(click_data):
 
 
 def main():
-    global _propagation_done, _total_objects, _n_time_steps, _category_counts
+    global _propagation_done, _total_objects, _n_time_steps, _category_counts, _conjunctions
 
     logger.info("=" * 60)
     logger.info("  SPACE DEBRIS MONITORING PLATFORM")
-    logger.info("  SGP4 + Dask Bag/Parquet + Plotly/Dash")
+    logger.info("  SGP4 + Dask/Parquet + CA Engine + Plotly/Dash")
     logger.info("=" * 60)
 
     tle_path = _ensure_tle_data()

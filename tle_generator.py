@@ -52,14 +52,15 @@ def _compute_checksum(line):
 
 
 def _generate_tle_from_params(sat_num, epoch_day, inclination, raan, eccentricity, arg_perigee, mean_anomaly, mean_motion, rev_num):
-    line1 = f"1 {sat_num:05d}U 24001A   {epoch_day:012.8f}  .00010000  00000-0  15000-3 0  9999"
-    line1 = line1[:68] + " "
-    line1 = line1 + _compute_checksum(line1 + "0")
+    line1_field = f"1 {sat_num:05d}U 24001A   {epoch_day:012.8f}  .00010000  00000-0  15000-3 0  999"
+    line1_field = line1_field.ljust(68)
+    line1 = line1_field + _compute_checksum(line1_field)
 
-    ecc_str = f"{eccentricity:.7f}"[2:]
-    line2 = f"2 {sat_num:05d} {inclination:8.4f} {raan:8.4f} {ecc_str:7s} {arg_perigee:8.4f} {mean_anomaly:8.4f} {mean_motion:11.8f}{rev_num:5d}"
-    line2 = line2[:68] + " "
-    line2 = line2 + _compute_checksum(line2 + "0")
+    ecc_str = f"{eccentricity:.7f}"[2:].ljust(7)
+    mm_str = f"{mean_motion:12.8f}"[-12:]
+    line2_field = f"2 {sat_num:05d} {inclination:8.4f} {raan:8.4f} {ecc_str}{arg_perigee:8.4f} {mean_anomaly:8.4f} {mm_str}{rev_num:5d}"
+    line2_field = line2_field.ljust(68)
+    line2 = line2_field + _compute_checksum(line2_field)
 
     return line1, line2
 
@@ -144,11 +145,47 @@ def generate_heo_debris(n, start_id=50001):
     return entries
 
 
+def generate_conjunction_debris(n, start_id=90001):
+    entries = []
+    iss_l1 = "1 25544U 98067A   24001.50000000  .00016717  00000-0  30200-3 0  9993"
+    iss_l2 = "2 25544  51.6412 200.2345 0006703  50.4518 309.7468 15.4956052012345"
+
+    for i in range(n):
+        sat_num = start_id + i
+        rev_num = random.randint(1000, 99999)
+
+        if i < n // 3:
+            delta_ma = random.uniform(-0.001, 0.001)
+        elif i < 2 * n // 3:
+            delta_ma = random.uniform(-0.01, 0.01)
+        else:
+            delta_ma = random.uniform(-0.05, 0.05)
+
+        delta_raan = random.gauss(0, 0.0001)
+        delta_inc = random.gauss(0, 0.0001)
+
+        inc = 51.6412 + delta_inc
+        raan = 200.2345 + delta_raan
+        ma = 309.7468 + delta_ma
+
+        l1 = "1 {:05d}U".format(sat_num) + iss_l1[8:]
+        l2 = "2 {:05d}".format(sat_num) + " {:8.4f}".format(inc) + " {:8.4f}".format(raan) + " 0006703  {:8.4f}".format(50.4518) + " {:8.4f}".format(ma) + " 15.49560520{:5d}".format(rev_num)
+
+        l1_field = l1[:68].ljust(68)
+        l1 = l1_field + _compute_checksum(l1_field)
+        l2_field = l2[:68].ljust(68)
+        l2 = l2_field + _compute_checksum(l2_field)
+
+        entries.append((f"CONJ-{sat_num}", l1, l2))
+    return entries
+
+
 def generate_sample_tle_dataset(
     n_leo=2000,
     n_meo=300,
     n_geo=200,
     n_heo=100,
+    n_conjunction=20,
     output_path=None,
 ):
     random.seed(42)
@@ -158,8 +195,16 @@ def generate_sample_tle_dataset(
     entries.extend(generate_meo_debris(n_meo, start_id=70001))
     entries.extend(generate_geo_debris(n_geo, start_id=60001))
     entries.extend(generate_heo_debris(n_heo, start_id=50001))
+    entries.extend(generate_conjunction_debris(n_conjunction, start_id=90001))
 
     random.shuffle(entries)
+
+    iss_entry = (
+        "ISS (ZARYA)",
+        "1 25544U 98067A   24001.50000000  .00016717  00000-0  30200-3 0  9993",
+        "2 25544  51.6412 200.2345 0006703  50.4518 309.7468 15.4956052012345",
+    )
+    entries.insert(0, iss_entry)
 
     if output_path is None:
         os.makedirs(DATA_DIR, exist_ok=True)

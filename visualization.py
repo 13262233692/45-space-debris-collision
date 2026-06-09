@@ -185,8 +185,85 @@ def create_debris_snapshot_scatter(snapshot_df):
     return traces
 
 
+def create_conjunction_warning_lines(conjunctions, pulse_phase=0):
+    traces = []
+
+    if not conjunctions:
+        return traces
+
+    for conj in conjunctions:
+        p1 = conj["primary_pos_tca_km"]
+        p2 = conj["secondary_pos_tca_km"]
+        alert = conj["alert_level"]
+        poc = conj["poc"]
+
+        if alert == "RED":
+            color = "rgb(255,30,30)"
+            line_width = 4
+            opacity = 0.9
+        elif alert == "YELLOW":
+            color = "rgb(255,200,30)"
+            line_width = 2.5
+            opacity = 0.7
+        else:
+            color = "rgb(100,200,100)"
+            line_width = 1.5
+            opacity = 0.4
+
+        n_pulse = 20
+        t = np.linspace(0, 1, n_pulse)
+        x = p1[0] * (1 - t) + p2[0] * t
+        y = p1[1] * (1 - t) + p2[1] * t
+        z = p1[2] * (1 - t) + p2[2] * t
+
+        pulse_envelope = 0.3 + 0.7 * np.abs(np.sin(2 * np.pi * (t * 3 + pulse_phase)))
+        effective_opacity = opacity * pulse_envelope
+
+        line = go.Scatter3d(
+            x=x, y=y, z=z,
+            mode="lines",
+            line=dict(width=line_width, color=color),
+            opacity=opacity,
+            hovertemplate=(
+                f"<b>CONJUNCTION WARNING</b><br>"
+                f"Primary: {conj['primary_id']}<br>"
+                f"Secondary: {conj['secondary_id']}<br>"
+                f"Miss: {conj['miss_distance_km']:.3f} km<br>"
+                f"Rel.Vel: {conj['relative_velocity_kms']:.2f} km/s<br>"
+                f"PoC: {poc:.2e}<br>"
+                f"Alert: {alert}<extra></extra>"
+            ),
+            name=f"CA {alert}: {conj['primary_id'][:12]}↔{conj['secondary_id'][:12]}",
+            showlegend=True,
+        )
+        traces.append(line)
+
+        marker_size = 10 if alert == "RED" else 7 if alert == "YELLOW" else 4
+        marker_color = color
+
+        for pos, label in [(p1, conj["primary_id"]), (p2, conj["secondary_id"])]:
+            endpoint = go.Scatter3d(
+                x=[pos[0]], y=[pos[1]], z=[pos[2]],
+                mode="markers",
+                marker=dict(
+                    size=marker_size,
+                    color=marker_color,
+                    opacity=1.0 if alert == "RED" else 0.7,
+                    line=dict(width=2 if alert == "RED" else 1, color="white"),
+                    symbol="diamond" if alert == "RED" else "circle",
+                ),
+                hovertemplate=f"<b>{label}</b><br>X: {pos[0]:.0f} km<br>Y: {pos[1]:.0f} km<br>Z: {pos[2]:.0f} km<extra></extra>",
+                name=f"{'⚠' if alert == 'RED' else '△'} {label[:16]}",
+                showlegend=False,
+            )
+            traces.append(endpoint)
+
+    return traces
+
+
 def build_3d_scene(
     debris_traces,
+    conjunction_traces=None,
     show_earth=True,
     show_atmosphere=True,
     show_reference_orbits=True,
@@ -208,6 +285,10 @@ def build_3d_scene(
 
     for trace in debris_traces:
         fig.add_trace(trace)
+
+    if conjunction_traces:
+        for trace in conjunction_traces:
+            fig.add_trace(trace)
 
     axis_range = EARTH_RADIUS_KM * 8
     fig.update_layout(
